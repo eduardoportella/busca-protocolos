@@ -48,7 +48,7 @@ with st.expander("⚙️ Configurações de busca", expanded=False):
     retries = st.slider("Tentativas por protocolo", min_value=1, max_value=3, value=2)
     backoff_base = st.number_input("Backoff (segundos) entre tentativas", min_value=0.5, value=0.7, step=0.1, disabled=True)
 
-st.text("⚠️ O novo sistema de buscas de protocolos ainda está em fase de desenvolvimento. A contagem dos dias parados está sendo realizada manualmente pelo sistema, uma vez que o novo eProtocolo apresenta um bug nessa informação. Além disso, esta versão ainda não possui captura automática de erros, ficando sob responsabilidade do usuário a conferência dos protocolos retornados.")
+st.text("⚠️ O novo sistema de busca de protocolos ainda está em fase de desenvolvimento. A contagem dos dias parados está sendo realizada manualmente pelo sistema, uma vez que o novo eProtocolo apresenta um bug nessa informação. Além disso, esta versão ainda não possui captura automática de erros, ficando sob responsabilidade do usuário a conferência dos protocolos retornados.")
 
 # default_headers = {"User-Agent": user_agent}
 default_headers = {}

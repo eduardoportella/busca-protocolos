@@ -56,7 +56,7 @@ default_headers = {}
 # ==============================
 # Entrada de protocolos
 # ==============================
-protocolo_input = st.text_area("Inserir protocolos (um por linha)", value="22.361.208-3")
+protocolo_input = st.text_area("Inserir protocolos (um por linha)")
 protocol_numbers = [p.strip() for p in protocolo_input.strip().split("\n") if p.strip()]
 wrong_protocol_numbers: List[str] = []
 

@@ -44,11 +44,9 @@ with st.expander("⚙️ Configurações de busca", expanded=False):
     #     # disabled
     # )
     extra_params_text = "action=pesquisar"
-    max_workers = st.slider("Buscas Simultâneas (threads)", min_value=1, max_value=4, value=2, disabled=True)
+    max_workers = st.slider("Buscas Simultâneas (threads)", min_value=1, max_value=4, value=3, disabled=True)
     retries = st.slider("Tentativas por protocolo", min_value=1, max_value=3, value=2)
     backoff_base = st.number_input("Backoff (segundos) entre tentativas", min_value=0.5, value=0.7, step=0.1, disabled=True)
-
-st.text("⚠️ O novo sistema de busca de protocolos ainda está em fase de desenvolvimento. A contagem dos dias parados está sendo realizada manualmente pelo sistema, uma vez que o novo eProtocolo apresenta um bug nessa informação. Além disso, esta versão ainda não possui captura automática de erros, ficando sob responsabilidade do usuário a conferência dos protocolos retornados.")
 
 # default_headers = {"User-Agent": user_agent}
 default_headers = {}
@@ -68,13 +66,22 @@ def _clean_text(x: str) -> str:
     return " ".join((x or "").replace("\xa0", " ").strip().split())
 
 
+TZ_TOKENS = (" BRT", " GMT-3", " GMT-03", " -03:00")
+
 def process_time(x: str) -> Optional[datetime.datetime]:
     if not x:
         return None
-    dt = pd.to_datetime(x, dayfirst=True, errors="coerce")
+    s = str(x).strip()
+    # remove tokens de TZ não reconhecidos pelo parser'
+    for tok in TZ_TOKENS:
+        if s.endswith(tok):
+            s = s[: -len(tok)].strip()
+            break
+    dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
     if pd.isna(dt):
         return None
     return dt.to_pydatetime()
+
 
 
 def safe_to_int(dt: Optional[datetime.datetime]) -> int:
@@ -82,6 +89,25 @@ def safe_to_int(dt: Optional[datetime.datetime]) -> int:
         return 0
     days_diff = (datetime.datetime.now() - dt).days
     return int(days_diff)
+
+def safe_strftime(dt: Optional[datetime.datetime], fmt: str) -> Optional[str]:
+    """Formata com strftime apenas se dt não for None."""
+    if dt is None:
+        return None
+    try:
+        return dt.strftime(fmt)
+    except Exception:
+        return None
+
+def days_diff_or_none(dt: Optional[datetime.datetime]) -> Optional[int]:
+    """Retorna (hoje - dt).days se dt não for None; caso contrário, None."""
+    if dt is None:
+        return None
+    try:
+        return (datetime.datetime.now() - dt).days
+    except Exception:
+        return None
+
 
 
 def color_days(value):
@@ -241,15 +267,12 @@ def parse_eprotocolo_html(html: str) -> Dict[str, Optional[str]]:
     # tenta converter para datetime
     enviado_dt = process_time(enviado_em or "")
 
-    # se conseguir converter, formata em DD/MM/YYYY e HH:MM
-    enviado_em_fmt_data = enviado_dt.strftime("%d/%m/%Y") if enviado_dt else enviado_em
-    enviado_em_fmt_hora = enviado_dt.strftime("%H:%M") if enviado_dt else None
+    # formata com segurança
+    enviado_em_fmt_data = safe_strftime(enviado_dt, "%d/%m/%Y") or (enviado_em or None)
+    enviado_em_fmt_hora = safe_strftime(enviado_dt, "%H:%M")
 
-    # calcula dias parado = hoje - data enviado
-    if enviado_dt:
-        dias_parado_calc = (datetime.datetime.now() - enviado_dt).days
-    else:
-        dias_parado_calc = None
+    # calcula dias parado = hoje - data enviado (ou None)
+    dias_parado_calc = days_diff_or_none(enviado_dt)
 
     hier = extract_hierarchy(onde_esta or "")
 
@@ -264,10 +287,11 @@ def parse_eprotocolo_html(html: str) -> Dict[str, Optional[str]]:
         "diretoria": hier.get("diretoria"),
         "núcleo/grupo": hier.get("núcleo/grupo"),
         "coordenação": hier.get("coordenação"),
-        "dias parado": dias_parado_calc,   # <-- calculado agora
+        "dias parado": dias_parado_calc,
         "movimentação": motivo,
         "_enviado_em_dt": enviado_dt,
     }
+
 
 
 
@@ -325,12 +349,12 @@ def fetch_and_parse(numero_protocolo: str) -> Tuple[str, Optional[Dict[str, Opti
         return numero_protocolo, None
 
     data = parse_eprotocolo_html(html)
-    if not data.get("protocolo"):
-        data["protocolo"] = numero_protocolo
-    if not data.get("dias parado"):
-        data["dias parado"] = safe_to_int(data.get("_enviado_em_dt"))
-    return numero_protocolo, data
 
+    # se não conseguiu extrair o protocolo, tratamos como erro
+    if not data.get("protocolo"):
+        return numero_protocolo, None
+
+    return numero_protocolo, data
 
 
 def build_dataframe_from_protocolos(protocol_numbers: List[str]) -> pd.DataFrame:
@@ -345,14 +369,16 @@ def build_dataframe_from_protocolos(protocol_numbers: List[str]) -> pd.DataFrame
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(fetch_and_parse, p): p for p in unique}
+
         for fut in as_completed(futures):
             p = futures[fut]
             try:
                 _, data = fut.result()
-                if data:
+                # ✅ só considera ok se houver dict e protocolo válido
+                if data and is_valid_protocol(str(data.get("protocolo", "")).strip()):
                     rows.append(data)
                 else:
-                    wrong_protocol_numbers.append(p)
+                    wrong_protocol_numbers.append(p)   # marcou erro
             except Exception:
                 wrong_protocol_numbers.append(p)
             finally:
@@ -366,10 +392,12 @@ def build_dataframe_from_protocolos(protocol_numbers: List[str]) -> pd.DataFrame
 
     df = pd.DataFrame(rows)
 
-    if "dias em tramite" in df.columns:
-        df["dias em tramite"] = pd.to_numeric(df["dias em tramite"], errors="coerce").astype("Int64")
-    if "dias parado" in df.columns:
-        df["dias parado"] = pd.to_numeric(df["dias parado"], errors="coerce").fillna(0).astype(int)
+    if "Dias em trâmite" in df.columns:
+        df["Dias em trâmite"] = pd.to_numeric(df["Dias em trâmite"], errors="coerce").astype("Int64")
+
+    if "Dias Parado" in df.columns:
+        # Se veio None, vira NaN; depois preenche com 0 e converte para int
+        df["Dias Parado"] = pd.to_numeric(df["Dias Parado"], errors="coerce").fillna(0).astype(int)
 
     if "_enviado_em_dt" in df.columns:
         df.drop(columns=["_enviado_em_dt"], inplace=True, errors="ignore")
@@ -380,8 +408,7 @@ def build_dataframe_from_protocolos(protocol_numbers: List[str]) -> pd.DataFrame
             "dias em tramite": "Dias em trâmite",
             "local de envio": "Local de envio",
             "onde está": "Onde está",
-            "data enviado": "Enviado em",
-            "data enviado": "Data Enviado",
+            "data enviado": "Data Enviado",     # <- corrigido: uma única entrada
             "órgão": "Órgão",
             "diretoria": "Diretoria",
             "núcleo/grupo": "Núcleo/Grupo",
@@ -393,8 +420,9 @@ def build_dataframe_from_protocolos(protocol_numbers: List[str]) -> pd.DataFrame
         inplace=True,
     )
 
-    if "protocolo" in df.columns:
-        df.sort_values(by=["protocolo"], inplace=True, ignore_index=True)
+    # ordenar pela coluna já renomeada
+    if "Protocolo" in df.columns:
+        df.sort_values(by=["Protocolo"], inplace=True, ignore_index=True)
 
     desired = [
         "Protocolo",
@@ -456,14 +484,13 @@ def normalize_protocol(p: str) -> str:
 PROTO_REGEX = re.compile(r"^\d{2}\.\d{3}\.\d{3}-\d$")
 
 def normalize_protocol(p: str) -> str:
-    """Se for exatamente 9 dígitos, aplica máscara NN.NNN.NNN-N; caso contrário, retorna como veio."""
     s = re.sub(r"\D", "", p or "")
     if len(s) == 9:
         return f"{s[0:2]}.{s[2:5]}.{s[5:8]}-{s[8]}"
-    return p.strip()
+    return (p or "").strip()
 
 def is_valid_protocol(p: str) -> bool:
-    return bool(PROTO_REGEX.fullmatch(p.strip()))
+    return bool(PROTO_REGEX.fullmatch((p or "").strip()))
 
 
 if st.button("Buscar protocolos (POST)", type="primary", disabled=(len(protocol_numbers) == 0)):
@@ -485,6 +512,7 @@ if st.button("Buscar protocolos (POST)", type="primary", disabled=(len(protocol_
 
     # apenas válidos seguem para busca
     to_fetch = [p for p in normalized if is_valid_protocol(p)]
+
     df = build_dataframe_from_protocolos(to_fetch)
 
     elapsed = (datetime.datetime.now() - start).seconds
@@ -511,21 +539,18 @@ if st.button("Buscar protocolos (POST)", type="primary", disabled=(len(protocol_
 
         styled = df.style
         if "Dias Parado" in df.columns:
-            styled = styled.applymap(color_days, subset=["Dias Parado"])
+             styled = styled.map(color_days, subset=["Dias Parado"])
 
         st.dataframe(styled, use_container_width=True, hide_index=True, column_order=show_cols)
+
+        if wrong_protocol_numbers:
+            st.error(f"Protocolos com erro: {', '.join(wrong_protocol_numbers)}")
+        else:
+            st.success("Protocolos com erro: nenhum")
+
 
         # identifica protocolos que não retornaram no DF
         ok = set(df["Protocolo"].dropna().astype(str).str.strip().tolist()) if "Protocolo" in df.columns else set()
         missing = sorted([p for p in to_fetch if p not in ok])
-
-        # if invalid_reals or missing:
-        #     st.write("### Protocolos com erro")
-        #     if invalid_reals:
-        #         st.write(f"• **Formato inválido**: {invalid_reals}")
-        #     if missing:
-        #         st.write(f"• **Não encontrados/sem retorno**: {missing}")
-        # else:
-        #     st.write("Protocolos com erro - nenhum")
 
         make_downloads(df)
